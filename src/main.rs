@@ -1,3 +1,8 @@
+/**
+ * Similarity - determine how similar two files are.
+ *
+ * Based on git's estimate_similarity function in diffcore-rename.c
+ */
 #[macro_use]
 extern crate clap;
 #[macro_use]
@@ -228,7 +233,8 @@ pub fn main() {
     let matches = App::new("similarity")
         .version(crate_version!())
         .author("Vernon Jones <vernonrjones@gmail.com>")
-        .about("prints how similar (from 0 to 100%) two files are")
+        .about("prints how similar (from 0 to 100%) two files are - based on git's rename \
+                detection")
         .arg(Arg::with_name("left")
             .takes_value(true)
             .help("left file to check"))
