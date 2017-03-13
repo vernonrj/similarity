@@ -1,0 +1,9 @@
+[package]
+name = "similarity"
+version = "0.1.0"
+authors = ["Vernon Jones <vernonrjones@gmail.com>"]
+
+[dependencies]
+clap = "2.21"
+error-chain = "0.10"
+memchr = "1.0"
