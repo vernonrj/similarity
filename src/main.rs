@@ -24,6 +24,7 @@ mod errors {
 use errors::Result as DiffResult;
 use errors::ResultExt;
 
+/// Estimate the similarity of two files.
 fn estimate_similarity<P1, P2>(left: P1, right: P2) -> DiffResult<f64>
     where P1: AsRef<Path>,
           P2: AsRef<Path>
@@ -59,6 +60,7 @@ fn estimate_similarity<P1, P2>(left: P1, right: P2) -> DiffResult<f64>
     Ok(copied as f64 * MAX_SCORE / max_size as f64)
 }
 
+/// Count the number of changes between two files
 fn count_changes<P1, P2>(left: P1, right: P2) -> io::Result<(usize, usize)>
     where P1: AsRef<Path>,
           P2: AsRef<Path>
@@ -96,6 +98,7 @@ fn count_changes<P1, P2>(left: P1, right: P2) -> io::Result<(usize, usize)>
     Ok((source_copied, literal_added))
 }
 
+/// Returns the size of a file in bytes
 fn get_file_size<P: AsRef<Path>>(p: P) -> DiffResult<u64> {
     fs::metadata(p.as_ref())
         .map(|mt| mt.len())
@@ -107,6 +110,7 @@ fn get_file_size<P: AsRef<Path>>(p: P) -> DiffResult<u64> {
         })
 }
 
+/// Hashing of a file
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct SpanhashTop(HashMap<Vec<u8>, (u64, usize)>);
 
@@ -178,6 +182,9 @@ impl IntoIterator for SpanhashTop {
             })
             .collect();
         v.sort_by(|left, right| {
+            // We want to sort occurrence from largest to smallest.
+            // Our second sort key will be the hash value, which
+            // we'll sort from smallest to largest.
             match (left.occurrences, right.occurrences) {
                 (0, 0) => return cmp::Ordering::Equal,
                 (0, _) => return cmp::Ordering::Greater,
