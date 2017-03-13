@@ -25,7 +25,7 @@ use errors::Result as DiffResult;
 use errors::ResultExt;
 
 /// Estimate the similarity of two files.
-fn estimate_similarity<P1, P2>(left: P1, right: P2) -> DiffResult<f64>
+fn estimate_similarity<P1, P2>(left: P1, right: P2, is_binary: bool) -> DiffResult<f64>
     where P1: AsRef<Path>,
           P2: AsRef<Path>
 {
@@ -52,7 +52,7 @@ fn estimate_similarity<P1, P2>(left: P1, right: P2) -> DiffResult<f64>
         return Ok(0.0);
     }
 
-    let (copied, _) = count_changes(left.as_ref(), right.as_ref()).chain_err(|| {
+    let (copied, _) = count_changes(left.as_ref(), right.as_ref(), is_binary).chain_err(|| {
             format!("failed to count changes between {} <==> {}",
                     left.as_ref().display(),
                     right.as_ref().display())
@@ -61,12 +61,12 @@ fn estimate_similarity<P1, P2>(left: P1, right: P2) -> DiffResult<f64>
 }
 
 /// Count the number of changes between two files
-fn count_changes<P1, P2>(left: P1, right: P2) -> io::Result<(usize, usize)>
+fn count_changes<P1, P2>(left: P1, right: P2, is_binary: bool) -> io::Result<(usize, usize)>
     where P1: AsRef<Path>,
           P2: AsRef<Path>
 {
-    let mut source_top = SpanhashTop::from_file(left.as_ref())?.into_iter();
-    let mut dest_top = SpanhashTop::from_file(right.as_ref())?.into_iter();
+    let mut source_top = SpanhashTop::from_file(left.as_ref(), is_binary)?.into_iter();
+    let mut dest_top = SpanhashTop::from_file(right.as_ref(), is_binary)?.into_iter();
     let mut d: Spanhash = dest_top.next().unwrap_or_default();
     let mut literal_added = 0;
     let mut source_copied = 0;
@@ -115,11 +115,11 @@ fn get_file_size<P: AsRef<Path>>(p: P) -> DiffResult<u64> {
 struct SpanhashTop(HashMap<Vec<u8>, (u64, usize)>);
 
 impl SpanhashTop {
-    pub fn from_file<P: AsRef<Path>>(p: P) -> io::Result<Self> {
+    pub fn from_file<P: AsRef<Path>>(p: P, is_binary: bool) -> io::Result<Self> {
         let f = File::open(p.as_ref())?;
-        Self::from_reader(f)
+        Self::from_reader(f, is_binary)
     }
-    pub fn from_reader<R: Read>(mut reader: R) -> io::Result<Self> {
+    pub fn from_reader<R: Read>(mut reader: R, is_binary: bool) -> io::Result<Self> {
         let max_line_length = 64;
         let mut h = HashMap::new();
         let mut buf: Vec<u8> = vec![0; 128];
@@ -152,6 +152,13 @@ impl SpanhashTop {
                 };
                 let rest = buf.split_off(end_idx);
                 buf_len = buf_len - end_idx;
+                let has_crlf = end_idx > 1 && buf[end_idx - 1] == b'\n' &&
+                               buf[end_idx - 2] == b'\r';
+                if !is_binary && has_crlf {
+                    // Ignore CR in CRLF sequence if text
+                    buf[end_idx - 2] = b'\n';
+                    buf.pop();
+                }
                 let hashed = {
                     let mut hasher = DefaultHasher::new();
                     buf.hash(&mut hasher);
@@ -228,10 +235,14 @@ pub fn main() {
         .arg(Arg::with_name("right")
             .takes_value(true)
             .help("right file to check"))
+        .arg(Arg::with_name("binary")
+            .long("binary")
+            .help("treat files as binary files (don't ignore CRLF)"))
         .get_matches();
     let left = matches.value_of("left").unwrap();
     let right = matches.value_of("right").unwrap();
-    let similarity = match estimate_similarity(left, right) {
+    let is_binary = matches.is_present("binary");
+    let similarity = match estimate_similarity(left, right, is_binary) {
         Ok(s) => s,
         Err(e) => {
             use std::io::Write;
