@@ -12,7 +12,7 @@ extern crate memchr;
 use std::collections::hash_map::{HashMap, DefaultHasher};
 use std::cmp;
 use std::fmt;
-use std::fs::{self, File};
+use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read};
 use std::path::Path;
@@ -29,19 +29,23 @@ mod errors {
 use errors::Result as DiffResult;
 use errors::ResultExt;
 
-/// Estimate the similarity of two files.
-fn estimate_similarity<P1, P2>(left: P1, right: P2, is_binary: bool) -> DiffResult<f64>
+pub fn run<P1, P2>(left: P1, right: P2, is_binary: bool) -> DiffResult<f64>
     where P1: AsRef<Path>,
           P2: AsRef<Path>
 {
-    let left_size = get_file_size(left.as_ref()).chain_err(|| {
-            format!("failed to estimate similarity: trouble with {}",
-                    left.as_ref().display())
-        })?;
-    let right_size = get_file_size(right.as_ref()).chain_err(|| {
-            format!("failed to estimate similarity: trouble with {}",
-                    right.as_ref().display())
-        })?;
+    let left = left.as_ref();
+    let right = right.as_ref();
+    let source_spantop =
+        SpanhashTop::from_file(left, is_binary).chain_err(|| "failed to hash left file")?;
+    let dest_spantop =
+        SpanhashTop::from_file(right, is_binary).chain_err(|| "failed to hash right file")?;
+    estimate_similarity(source_spantop, dest_spantop)
+}
+
+/// Estimate the similarity of two files.
+fn estimate_similarity(left: SpanhashTop, right: SpanhashTop) -> DiffResult<f64> {
+    let left_size = left.len();
+    let right_size = right.len();
     let max_size = cmp::max(left_size, right_size);
     let base_size = cmp::min(left_size, right_size);
     let delta_size = max_size - base_size;
@@ -63,21 +67,14 @@ fn estimate_similarity<P1, P2>(left: P1, right: P2, is_binary: bool) -> DiffResu
         (_, _) => (),
     }
 
-    let (copied, _) = count_changes(left.as_ref(), right.as_ref(), is_binary).chain_err(|| {
-            format!("failed to count changes between {} <==> {}",
-                    left.as_ref().display(),
-                    right.as_ref().display())
-        })?;
+    let (copied, _) = count_changes(left, right);
     Ok(copied as f64 * MAX_SCORE / max_size as f64)
 }
 
 /// Count the number of changes between two files
-fn count_changes<P1, P2>(left: P1, right: P2, is_binary: bool) -> io::Result<(usize, usize)>
-    where P1: AsRef<Path>,
-          P2: AsRef<Path>
-{
-    let mut source_top = SpanhashTop::from_file(left.as_ref(), is_binary)?.into_iter();
-    let mut dest_top = SpanhashTop::from_file(right.as_ref(), is_binary)?.into_iter();
+fn count_changes(left: SpanhashTop, right: SpanhashTop) -> (usize, usize) {
+    let mut source_top = left.into_iter();
+    let mut dest_top = right.into_iter();
     let mut d: Spanhash = dest_top.next().unwrap_or_default();
     let mut literal_added = 0;
     let mut source_copied = 0;
@@ -106,20 +103,9 @@ fn count_changes<P1, P2>(left: P1, right: P2, is_binary: bool) -> io::Result<(us
         literal_added += d.occurrences;
         d = dest_top.next().unwrap_or_default();
     }
-    Ok((source_copied, literal_added))
+    (source_copied, literal_added)
 }
 
-/// Returns the size of a file in bytes
-fn get_file_size<P: AsRef<Path>>(p: P) -> DiffResult<u64> {
-    fs::metadata(p.as_ref())
-        .map(|mt| mt.len())
-        .map_err(|e| {
-            format!("failed to get file size for {}: {}",
-                    p.as_ref().display(),
-                    e)
-                .into()
-        })
-}
 
 /// Hashing of a file
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -182,6 +168,9 @@ impl SpanhashTop {
             }
         }
         Ok(SpanhashTop(h))
+    }
+    pub fn len(&self) -> usize {
+        self.0.values().fold(0, |a, &(_, occ)| a + occ)
     }
 }
 
@@ -254,7 +243,7 @@ pub fn main() {
     let left = matches.value_of("left").unwrap();
     let right = matches.value_of("right").unwrap();
     let is_binary = matches.is_present("binary");
-    let similarity = match estimate_similarity(left, right, is_binary) {
+    let similarity = match run(left, right, is_binary) {
         Ok(s) => s,
         Err(e) => {
             use std::io::Write;
