@@ -56,6 +56,12 @@ fn estimate_similarity<P1, P2>(left: P1, right: P2, is_binary: bool) -> DiffResu
     if max_size as f64 * (MAX_SCORE - MIN_SCORE) < delta_size as f64 * MAX_SCORE {
         return Ok(0.0);
     }
+    // Check file sizes. If there's an empty file, we can stop here.
+    match (left_size, right_size) {
+        (0, 0) => return Ok(MAX_SCORE),
+        (0, _) | (_, 0) => return Ok(0.0),
+        (_, _) => (),
+    }
 
     let (copied, _) = count_changes(left.as_ref(), right.as_ref(), is_binary).chain_err(|| {
             format!("failed to count changes between {} <==> {}",
