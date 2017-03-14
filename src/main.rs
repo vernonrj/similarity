@@ -1,235 +1,178 @@
-/**
- * Similarity - determine how similar two files are.
- *
- * Based on git's estimate_similarity function in diffcore-rename.c
- */
 #[macro_use]
 extern crate clap;
 #[macro_use]
 extern crate error_chain;
 extern crate memchr;
 
-use std::collections::hash_map::{HashMap, DefaultHasher};
-use std::cmp;
-use std::fmt;
+use std::collections::hash_map::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
-use std::hash::{Hash, Hasher};
-use std::io::{self, Read};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use clap::{App, Arg};
-
-const MAX_SCORE: f64 = 60000.0;
-const MIN_SCORE: f64 = 30000.0;
 
 mod errors {
     error_chain!{}
 }
 
-use errors::Result as DiffResult;
-use errors::ResultExt;
+pub use errors::Result as DiffResult;
+pub use errors::Error as DiffError;
+pub use errors::ResultExt;
 
-pub fn run<P1, P2>(left: P1, right: P2, is_binary: bool) -> DiffResult<f64>
+pub mod diffcore;
+
+pub fn run<P1, P2>(left: P1, right: P2, _is_binary: bool) -> DiffResult<f64>
     where P1: AsRef<Path>,
           P2: AsRef<Path>
 {
-    let left = left.as_ref();
-    let right = right.as_ref();
-    let source_spantop =
-        SpanhashTop::from_file(left, is_binary).chain_err(|| "failed to hash left file")?;
-    let dest_spantop =
-        SpanhashTop::from_file(right, is_binary).chain_err(|| "failed to hash right file")?;
-    estimate_similarity(source_spantop, dest_spantop)
-}
-
-/// Estimate the similarity of two files.
-fn estimate_similarity(left: SpanhashTop, right: SpanhashTop) -> DiffResult<f64> {
-    let left_size = left.len();
-    let right_size = right.len();
-    let max_size = cmp::max(left_size, right_size);
-    let base_size = cmp::min(left_size, right_size);
-    let delta_size = max_size - base_size;
-    // We would not consider edits that change the file size so
-    // drastically.  delta_size must be smaller than
-    // (MAX_SCORE-minimum_score)/MAX_SCORE * min(src->size, dst->size).
-    //
-    // Note that base_size == 0 case is handled here already
-    // and the final score computation below would not have a
-    // divide-by-zero issue.
-    //
-    if max_size as f64 * (MAX_SCORE - MIN_SCORE) < delta_size as f64 * MAX_SCORE {
-        return Ok(0.0);
-    }
-    // Check file sizes. If there's an empty file, we can stop here.
-    match (left_size, right_size) {
-        (0, 0) => return Ok(MAX_SCORE),
-        (0, _) | (_, 0) => return Ok(0.0),
-        (_, _) => (),
-    }
-
-    let (copied, _) = count_changes(left, right);
-    Ok(copied as f64 * MAX_SCORE / max_size as f64)
-}
-
-/// Count the number of changes between two files
-fn count_changes(left: SpanhashTop, right: SpanhashTop) -> (usize, usize) {
-    let mut source_top = left.into_iter();
-    let mut dest_top = right.into_iter();
-    let mut d: Spanhash = dest_top.next().unwrap_or_default();
-    let mut literal_added = 0;
-    let mut source_copied = 0;
-    while let Some(s) = source_top.next() {
-        while d.occurrences != 0 {
-            if d.hashval >= s.hashval {
-                break;
-            }
-            literal_added += d.occurrences;
-            d = dest_top.next().unwrap_or_default();
-        }
-        let src_cnt = s.occurrences;
-        let mut dst_cnt = 0;
-        if d.occurrences > 0 && d.hashval == s.hashval {
-            dst_cnt = d.occurrences;
-            d = dest_top.next().unwrap_or_default();
-        }
-        if src_cnt < dst_cnt {
-            literal_added += dst_cnt - src_cnt;
-            source_copied += src_cnt;
-        } else {
-            source_copied += dst_cnt;
-        }
-    }
-    while d.occurrences > 0 {
-        literal_added += d.occurrences;
-        d = dest_top.next().unwrap_or_default();
-    }
-    (source_copied, literal_added)
-}
-
-
-/// Hashing of a file
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct SpanhashTop(HashMap<Vec<u8>, (u64, usize)>);
-
-impl SpanhashTop {
-    pub fn from_file<P: AsRef<Path>>(p: P, is_binary: bool) -> io::Result<Self> {
-        let f = File::open(p.as_ref())?;
-        Self::from_reader(f, is_binary)
-    }
-    pub fn from_reader<R: Read>(mut reader: R, is_binary: bool) -> io::Result<Self> {
-        let max_line_length = 64;
-        let mut h = HashMap::new();
-        let mut buf: Vec<u8> = vec![0; 128];
-        let mut is_done = false;
-        let mut buf_len = 0;
-        while !is_done {
-            buf.resize(max_line_length, 0);
-            match reader.read(&mut buf[buf_len..max_line_length]) {
-                Ok(0) => {
-                    is_done = true;
-                }
-                Ok(n) => {
-                    buf_len += n;
-                    if buf_len < max_line_length {
-                        continue;
-                    }
-                }
-                Err(_) => {
-                    is_done = true;
-                    ()
-                }
-            }
-            while buf_len > 0 {
-                let end_idx = if let Some(idx) = memchr::memchr(b'\n', &buf[..buf_len]) {
-                    idx + 1
-                } else if buf_len < max_line_length {
-                    break;
-                } else {
-                    max_line_length
-                };
-                let rest = buf.split_off(end_idx);
-                buf_len = buf_len - end_idx;
-                let has_crlf = end_idx > 1 && buf[end_idx - 1] == b'\n' &&
-                               buf[end_idx - 2] == b'\r';
-                if !is_binary && has_crlf {
-                    // Ignore CR in CRLF sequence if text
-                    buf[end_idx - 2] = b'\n';
-                    buf.pop();
-                }
-                let hashed = {
-                    let mut hasher = DefaultHasher::new();
-                    buf.hash(&mut hasher);
-                    hasher.finish()
-                };
-                let cnt = buf.len();
-                let mut e = h.entry(buf).or_insert((hashed, 0));
-                e.1 += cnt;
-                buf = rest;
+    let (left, run_len): (HashMap<u32, Vec<(usize, f64)>>, _) =
+        trigramize_file_to_table(left.as_ref())?;
+    let right: Vec<HashSet<u32>> = trigramize_file(right.as_ref())?;
+    let mut sim: Vec<HashMap<usize, f64>> = Vec::new();
+    for trigs in right {
+        let mut matches: HashMap<usize, f64> = HashMap::new();
+        for trigram in trigs {
+            let found_lines = if let Some(v) = left.get(&trigram) {
+                v
+            } else {
+                continue;
+            };
+            for &(line, perc) in found_lines {
+                let mut found = matches.entry(line).or_insert(0.0);
+                *found += perc;
             }
         }
-        Ok(SpanhashTop(h))
-    }
-    pub fn len(&self) -> usize {
-        self.0.values().fold(0, |a, &(_, occ)| a + occ)
-    }
-}
-
-impl IntoIterator for SpanhashTop {
-    type IntoIter = std::vec::IntoIter<Spanhash>;
-    type Item = Spanhash;
-    fn into_iter(self) -> Self::IntoIter {
-        let mut v: Vec<Self::Item> = self.0
-            .into_iter()
-            .map(|(data, (hashed, occ))| {
-                Spanhash {
-                    data: data,
-                    hashval: hashed,
-                    occurrences: occ,
-                }
-            })
+        let matches: HashMap<_, _> = matches.into_iter()
+            .filter(|&(_, v)| v > 0.40)
             .collect();
-        v.sort_by(|left, right| {
-            // We want to sort occurrence from largest to smallest.
-            // Our second sort key will be the hash value, which
-            // we'll sort from smallest to largest.
-            match (left.occurrences, right.occurrences) {
-                (0, 0) => return cmp::Ordering::Equal,
-                (0, _) => return cmp::Ordering::Greater,
-                (_, 0) => return cmp::Ordering::Less,
-                (_, _) => (),
+        sim.push(matches);
+    }
+    let runs = find_runs(sim);
+    let similarity = runs_to_percent(runs, run_len);
+    Ok(similarity)
+}
+
+fn runs_to_percent(runs: Vec<((usize, usize), (usize, usize), Vec<f64>)>, len: usize) -> f64 {
+    if len == 0 {
+        // TODO: what to return here?
+        return 100.0;
+    }
+    let mut lines = vec![0.0; len+1];
+    for run in runs {
+        // println!("{:?}", run);
+        let ((start, end), _, percs) = run;
+        debug_assert!((start..end + 1).count() == percs.len());
+        for (line, perc) in (start..end + 1).zip(percs) {
+            lines[line] = f64::max(perc, lines[line]);
+        }
+    }
+    // println!("lines = {:?}", lines);
+    lines.iter().skip(1).sum::<f64>() / (lines.len() - 1) as f64 * 100.0
+}
+
+fn find_runs(sim: Vec<HashMap<usize, f64>>) -> Vec<((usize, usize), (usize, usize), Vec<f64>)> {
+    let mut runs = HashMap::new();
+    let mut found_runs: HashMap<usize, ((usize, usize), (usize, usize), Vec<f64>)> = HashMap::new();
+    for (idx, right_line) in sim.into_iter().enumerate().map(|(x, y)| (x + 1, y)) {
+        let mut expected_runs = HashMap::new();
+        for (line, perc) in right_line.into_iter() {
+            let (mut left, mut right, mut percs) = runs.remove(&(line - 1))
+                .unwrap_or(((line, line), (idx, idx), vec![]));
+            left.1 = line;
+            right.1 = idx;
+            percs.push(perc);
+            expected_runs.insert(line, (left, right, percs));
+        }
+        let runs_keys: HashSet<usize> = runs.keys().cloned().collect();
+        let expected_keys: HashSet<usize> = expected_runs.keys().map(|k| k - 1).collect();
+        let done_runs = runs_keys.difference(&expected_keys);
+        for done in done_runs {
+            let run: ((usize, usize), (usize, usize), Vec<f64>) = runs.remove(done).unwrap();
+            let length = (run.0).1 - (run.0).0;
+            if length > 3 {
+                found_runs.insert(done.clone(), run);
             }
-            left.hashval.cmp(&right.hashval)
-        });
-        v.into_iter()
+        }
+        runs = expected_runs;
+    }
+    for (key, val) in runs {
+        let length = (val.0).1 - (val.0).0;
+        if length > 3 {
+            found_runs.insert(key, val);
+        }
+    }
+    found_runs.into_iter().map(|(_, v)| v).collect()
+}
+
+fn trigramize_file_to_table<P>(filename: P) -> DiffResult<(HashMap<u32, Vec<(usize, f64)>>, usize)>
+    where P: AsRef<Path>
+{
+    let f = File::open(filename.as_ref())
+        .chain_err(|| format!("failed to open file {}", filename.as_ref().display()))?;
+    let lines = BufReader::new(f).lines();
+    let mut h = HashMap::new();
+    let mut last_index = 0;
+    for (idx, line) in lines.enumerate().map(|(x, y)| (x + 1, y)) {
+        last_index = idx;
+        let line = format!("{}\n", line.chain_err(|| "failed to get line from reader")?);
+        let trigram_line = make_trigrams(&line);
+        let tri_len = trigram_line.len();
+        for tri in trigram_line {
+            h.entry(tri)
+                .or_insert(Vec::new())
+                .push((idx, 1.0 / tri_len as f64));
+        }
+    }
+    Ok((h, last_index))
+}
+
+fn trigramize_file<P>(filename: P) -> DiffResult<Vec<HashSet<u32>>>
+    where P: AsRef<Path>
+{
+    let f = File::open(filename.as_ref())
+        .chain_err(|| format!("failed to open file {}", filename.as_ref().display()))?;
+    let lines = BufReader::new(f).lines();
+    Ok(lines.into_iter()
+        .map(|l| format!("{}\n", l.unwrap()))
+        .map(|t| make_trigrams(&t))
+        .collect())
+}
+
+fn slice_to_trigram(slice: &[u8]) -> DiffResult<u32> {
+    match slice.len() {
+        0 => Ok(0),
+        1 => Ok((slice[0] as u32) << 16),
+        2 => Ok(((slice[0] as u32) << 16) | ((slice[1] as u32) << 8)),
+        3 => Ok(((slice[0] as u32) << 16) | ((slice[1] as u32) << 8) | (slice[2] as u32)),
+        e => Err(format!("too many elements in slice. expected 3, got {}", e).into()),
     }
 }
 
-#[derive(Clone, Default, PartialEq, Eq)]
-struct Spanhash {
-    data: Vec<u8>,
-    hashval: u64,
-    occurrences: usize,
-}
-
-impl fmt::Debug for Spanhash {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f,
-               "Spanhash {{ data: {data:?} ({data_str}), hashval: 0x{h:x}, occurrences: {o} }}",
-               data = self.data,
-               data_str = String::from_utf8_lossy(&self.data).replace("\n", "\\n"),
-               h = self.hashval,
-               o = self.occurrences)
+fn make_trigrams(text: &str) -> HashSet<u32> {
+    let bytes = text.as_bytes();
+    let mut s: HashSet<u32> = bytes.windows(3).map(|t| slice_to_trigram(t).unwrap()).collect();
+    if bytes.len() < 3 {
+        // println!("> len = {}", bytes.len());
+        if bytes.len() > 0 {
+            let len = bytes.len();
+            s.insert(slice_to_trigram(&bytes[len - 1..]).unwrap());
+        }
+        if bytes.len() > 1 {
+            let len = bytes.len();
+            s.insert(slice_to_trigram(&bytes[len - 2..]).unwrap());
+        }
+        // println!(">> s = {:?}", s);
     }
+    s
 }
-
 
 
 pub fn main() {
     let matches = App::new("similarity")
         .version(crate_version!())
         .author("Vernon Jones <vernonrjones@gmail.com>")
-        .about("prints how similar (from 0 to 100%) two files are - based on git's rename \
-                detection")
+        .about("prints how similar (from 0 to 100%) two files are")
         .arg(Arg::with_name("left")
             .takes_value(true)
             .help("left file to check"))
@@ -259,5 +202,6 @@ pub fn main() {
             std::process::exit(1);
         }
     };
-    println!("{:.2}", similarity as f64 * 100.0 / MAX_SCORE);
+    println!("{:.2}", similarity);
+    // println!("{:.2}", similarity as f64 * 100.0 / MAX_SCORE);
 }
